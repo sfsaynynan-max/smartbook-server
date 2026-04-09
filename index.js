@@ -11,16 +11,82 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
 
-// =============================
 // Health Check
-// =============================
 app.get('/', (req, res) => {
   res.json({ status: 'SmartBook Server Running 🚀' });
 });
 
-// =============================
-// ترجمة فقرة واحدة مع كاش
-// =============================
+// جلب نص الكتاب
+app.get('/book-text/:bookId', async (req, res) => {
+  const { bookId } = req.params;
+
+  const urls = [
+    `https://www.gutenberg.org/cache/epub/${bookId}/pg${bookId}.txt`,
+    `https://www.gutenberg.org/files/${bookId}/${bookId}-0.txt`,
+    `https://www.gutenberg.org/files/${bookId}/${bookId}.txt`,
+  ];
+
+  for (const url of urls) {
+    try {
+      const response = await axios.get(url, {
+        timeout: 15000,
+        responseType: 'text',
+      });
+      if (response.status === 200 && response.data.length > 1000) {
+        const paragraphs = extractParagraphs(response.data);
+        if (paragraphs.length > 0) {
+          return res.json({ success: true, paragraphs });
+        }
+      }
+    } catch (e) {
+      continue;
+    }
+  }
+
+  return res.json({ success: false, paragraphs: [] });
+});
+
+function extractParagraphs(text) {
+  let startIndex = 0;
+  const startMarkers = [
+    '*** START OF THE PROJECT GUTENBERG',
+    '*** START OF THIS PROJECT GUTENBERG',
+    'CHAPTER I',
+    'Chapter I',
+    'CHAPTER 1',
+    'Chapter 1',
+  ];
+  for (const marker of startMarkers) {
+    const idx = text.indexOf(marker);
+    if (idx !== -1) {
+      startIndex = idx + marker.length;
+      break;
+    }
+  }
+
+  let endIndex = text.length;
+  const endMarkers = [
+    '*** END OF THE PROJECT GUTENBERG',
+    '*** END OF THIS PROJECT GUTENBERG',
+    'End of the Project Gutenberg',
+  ];
+  for (const marker of endMarkers) {
+    const idx = text.indexOf(marker, startIndex);
+    if (idx !== -1) {
+      endIndex = idx;
+      break;
+    }
+  }
+
+  const content = text.substring(startIndex, endIndex);
+  return content
+    .split(/\n\s*\n/)
+    .map(p => p.trim().replace(/\s+/g, ' ').replace(/_/g, ''))
+    .filter(p => p.length > 80 && !p.startsWith('***'))
+    .slice(0, 40);
+}
+
+// ترجمة فقرة واحدة
 app.post('/translate', async (req, res) => {
   const { bookId, paragraphIndex, text, targetLanguage } = req.body;
 
@@ -29,7 +95,6 @@ app.post('/translate', async (req, res) => {
   }
 
   try {
-    // ١ — تحقق من الكاش في قاعدة البيانات
     const cached = await pool.query(
       `SELECT translated_text FROM translations 
        WHERE book_id = $1 AND language = $2 AND paragraph_index = $3`,
@@ -43,7 +108,6 @@ app.post('/translate', async (req, res) => {
       });
     }
 
-    // ٢ — إذا لم توجد ترجمة — نطلب من DeepSeek
     const response = await axios.post(
       'https://api.deepseek.com/v1/chat/completions',
       {
@@ -51,15 +115,9 @@ app.post('/translate', async (req, res) => {
         messages: [
           {
             role: 'system',
-            content: `You are a professional literary translator. 
-Translate the given text to ${targetLanguage}. 
-Keep the literary style and tone. 
-Return ONLY the translated text, nothing else.`,
+            content: `You are a professional literary translator. Translate the given text to ${targetLanguage}. Keep the literary style and tone. Return ONLY the translated text, nothing else.`,
           },
-          {
-            role: 'user',
-            content: text,
-          },
+          { role: 'user', content: text },
         ],
         max_tokens: 1000,
         temperature: 0.3,
@@ -74,7 +132,6 @@ Return ONLY the translated text, nothing else.`,
 
     const translated = response.data.choices[0].message.content;
 
-    // ٣ — احفظ في قاعدة البيانات
     await pool.query(
       `INSERT INTO translations 
        (book_id, language, paragraph_index, original_text, translated_text)
@@ -90,9 +147,7 @@ Return ONLY the translated text, nothing else.`,
   }
 });
 
-// =============================
-// ترجمة كتاب كامل دفعة واحدة
-// =============================
+// ترجمة كتاب كامل
 app.post('/translate-book', async (req, res) => {
   const { bookId, paragraphs, targetLanguage } = req.body;
 
@@ -106,7 +161,6 @@ app.post('/translate-book', async (req, res) => {
     for (let i = 0; i < paragraphs.length; i++) {
       const text = paragraphs[i];
 
-      // تحقق من الكاش
       const cached = await pool.query(
         `SELECT translated_text FROM translations 
          WHERE book_id = $1 AND language = $2 AND paragraph_index = $3`,
@@ -122,7 +176,6 @@ app.post('/translate-book', async (req, res) => {
         continue;
       }
 
-      // ترجمة جديدة
       try {
         const response = await axios.post(
           'https://api.deepseek.com/v1/chat/completions',
@@ -148,7 +201,6 @@ app.post('/translate-book', async (req, res) => {
 
         const translated = response.data.choices[0].message.content;
 
-        // احفظ
         await pool.query(
           `INSERT INTO translations 
            (book_id, language, paragraph_index, original_text, translated_text)
@@ -158,9 +210,7 @@ app.post('/translate-book', async (req, res) => {
         );
 
         results.push({ index: i, translated, cached: false });
-
-        // تأخير لتجنب rate limiting
-        await new Promise((r) => setTimeout(r, 300));
+        await new Promise(r => setTimeout(r, 300));
       } catch (err) {
         results.push({ index: i, translated: text, cached: false });
       }
@@ -173,9 +223,7 @@ app.post('/translate-book', async (req, res) => {
   }
 });
 
-// =============================
 // جلب ترجمة محفوظة
-// =============================
 app.get('/translation/:bookId/:language', async (req, res) => {
   const { bookId, language } = req.params;
 
@@ -192,16 +240,13 @@ app.get('/translation/:bookId/:language', async (req, res) => {
       return res.json({ exists: false, paragraphs: [] });
     }
 
-    const paragraphs = result.rows.map((r) => r.translated_text);
+    const paragraphs = result.rows.map(r => r.translated_text);
     return res.json({ exists: true, paragraphs });
   } catch (error) {
     return res.status(500).json({ error: 'Database error' });
   }
 });
 
-// =============================
-// تشغيل السيرفر
-// =============================
 initDB().then(() => {
   app.listen(PORT, () => {
     console.log(`🚀 SmartBook Server running on port ${PORT}`);
