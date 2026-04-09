@@ -26,7 +26,6 @@ class _ReadingScreenState extends State<ReadingScreen>
     with TickerProviderStateMixin {
   List<String> _primaryParagraphs = [];
   List<String> _secondaryParagraphs = [];
-
   bool _loadingText = true;
   bool _translating = false;
   double _translationProgress = 0.0;
@@ -37,7 +36,9 @@ class _ReadingScreenState extends State<ReadingScreen>
   late AnimationController _toolbarController;
   late Animation<double> _toolbarAnimation;
 
-  bool get _isOriginalPrimary => widget.primaryLanguage == 'الأصلية';
+  bool get _isOriginalPrimary =>
+      widget.primaryLanguage == 'الأصلية' ||
+      widget.primaryLanguage == 'English';
   bool get _hasSecondary => widget.secondaryLanguage != null;
 
   @override
@@ -58,74 +59,94 @@ class _ReadingScreenState extends State<ReadingScreen>
   }
 
   Future<void> _loadContent() async {
-    final paragraphs =
-    await GutenbergService.fetchBookParagraphs(widget.book.id);
+    try {
+      final paragraphs =
+          await GutenbergService.fetchBookParagraphs(widget.book.id);
 
-    if (!mounted) return;
-    setState(() {
-      _primaryParagraphs = paragraphs;
-      _loadingText = false;
-    });
+      if (!mounted) return;
 
-    // ترجمة في الخلفية إذا طلب المستخدم لغة غير الأصلية
-    if (!_isOriginalPrimary && widget.primaryLanguage != 'English') {
+      if (paragraphs.isEmpty) {
+        setState(() => _loadingText = false);
+        return;
+      }
+
       setState(() {
-        _translating = true;
-        _translationProgress = 0.0;
+        _primaryParagraphs = paragraphs;
+        _loadingText = false;
       });
 
-      final cached = await TranslationService.loadBookTranslation(
-        bookId: widget.book.id,
-        language: widget.primaryLanguage,
-      );
-
-      if (cached != null) {
+      // ترجمة في الخلفية
+      if (!_isOriginalPrimary) {
+        if (!mounted) return;
         setState(() {
-          _primaryParagraphs = cached;
-          _translating = false;
+          _translating = true;
+          _translationProgress = 0.0;
         });
-      } else {
-        final results = await TranslationService.translateParagraphs(
-          paragraphs: paragraphs,
-          targetLanguage: widget.primaryLanguage,
-          sourceLanguage: 'English',
-          bookId: widget.book.id,
-          onProgress: (p) =>
-              setState(() => _translationProgress = p),
-        );
-        setState(() {
-          _primaryParagraphs = results;
-          _translating = false;
-        });
-      }
-    }
 
-    // اللغة الثانوية
-    if (_hasSecondary && widget.secondaryLanguage != 'الأصلية') {
-      final cached2 = await TranslationService.loadBookTranslation(
-        bookId: widget.book.id,
-        language: widget.secondaryLanguage!,
-      );
-      if (cached2 != null) {
-        setState(() => _secondaryParagraphs = cached2);
-      } else {
-        final results2 = await TranslationService.translateParagraphs(
-          paragraphs: paragraphs,
-          targetLanguage: widget.secondaryLanguage!,
-          sourceLanguage: 'English',
+        final cached = await TranslationService.loadBookTranslation(
           bookId: widget.book.id,
-          onProgress: (_) {},
+          language: widget.primaryLanguage,
         );
-        setState(() => _secondaryParagraphs = results2);
+
+        if (!mounted) return;
+
+        if (cached != null && cached.isNotEmpty) {
+          setState(() {
+            _primaryParagraphs = cached;
+            _translating = false;
+          });
+        } else {
+          final results = await TranslationService.translateParagraphs(
+            paragraphs: paragraphs,
+            targetLanguage: widget.primaryLanguage,
+            sourceLanguage: 'English',
+            bookId: widget.book.id,
+            onProgress: (p) {
+              if (mounted) setState(() => _translationProgress = p);
+            },
+          );
+          if (!mounted) return;
+          setState(() {
+            _primaryParagraphs = results;
+            _translating = false;
+          });
+        }
       }
-    } else if (_hasSecondary && widget.secondaryLanguage == 'الأصلية') {
-      setState(() => _secondaryParagraphs = paragraphs);
+
+      // اللغة الثانوية
+      if (_hasSecondary) {
+        final secLang = widget.secondaryLanguage!;
+        if (secLang == 'الأصلية' || secLang == 'English') {
+          if (mounted) setState(() => _secondaryParagraphs = paragraphs);
+        } else {
+          final cached2 = await TranslationService.loadBookTranslation(
+            bookId: widget.book.id,
+            language: secLang,
+          );
+          if (!mounted) return;
+          if (cached2 != null && cached2.isNotEmpty) {
+            setState(() => _secondaryParagraphs = cached2);
+          } else {
+            final results2 =
+                await TranslationService.translateParagraphs(
+              paragraphs: paragraphs,
+              targetLanguage: secLang,
+              sourceLanguage: 'English',
+              bookId: widget.book.id,
+              onProgress: (_) {},
+            );
+            if (!mounted) return;
+            setState(() => _secondaryParagraphs = results2);
+          }
+        }
+      }
+    } catch (e) {
+      if (mounted) setState(() => _loadingText = false);
     }
   }
 
-  bool _isRTL(String language) {
-    return ['العربية', 'الفارسية', 'العبرية'].contains(language);
-  }
+  bool _isRTL(String language) =>
+      ['العربية', 'الفارسية', 'العبرية'].contains(language);
 
   void _toggleToolbar() {
     setState(() => _showToolbar = !_showToolbar);
@@ -142,39 +163,41 @@ class _ReadingScreenState extends State<ReadingScreen>
       backgroundColor: const Color(0xFFFFFBF7),
       body: Stack(
         children: [
-          // المحتوى الرئيسي
+          // المحتوى
           _loadingText
               ? _buildLoadingState()
-              : GestureDetector(
-            onTap: _toggleToolbar,
-            child: ListView.builder(
-              padding: EdgeInsets.fromLTRB(
-                22,
-                MediaQuery.of(context).padding.top + 80,
-                22,
-                120,
-              ),
-              itemCount: _primaryParagraphs.length + 1,
-              itemBuilder: (context, index) {
-                if (index == 0 && _translating) {
-                  return _buildTranslatingBanner();
-                }
-                final paraIndex =
-                _translating ? index - 1 : index;
-                if (paraIndex >= _primaryParagraphs.length) {
-                  return const SizedBox();
-                }
-                return _buildParagraph(paraIndex);
-              },
-            ),
-          ),
+              : _primaryParagraphs.isEmpty
+                  ? _buildEmptyState()
+                  : GestureDetector(
+                      onTap: _toggleToolbar,
+                      child: SingleChildScrollView(
+                        physics: const BouncingScrollPhysics(),
+                        padding: EdgeInsets.fromLTRB(
+                          22,
+                          MediaQuery.of(context).padding.top + 80,
+                          22,
+                          120,
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            if (_translating)
+                              _buildTranslatingBanner(),
+                            ..._primaryParagraphs
+                                .asMap()
+                                .entries
+                                .map((e) => _buildParagraph(e.key))
+                                .toList(),
+                          ],
+                        ),
+                      ),
+                    ),
 
           // شريط أعلى
           AnimatedBuilder(
             animation: _toolbarAnimation,
             builder: (_, child) => Transform.translate(
-              offset:
-              Offset(0, -80 * (1 - _toolbarAnimation.value)),
+              offset: Offset(0, -80 * (1 - _toolbarAnimation.value)),
               child: Opacity(
                   opacity: _toolbarAnimation.value, child: child),
             ),
@@ -185,15 +208,12 @@ class _ReadingScreenState extends State<ReadingScreen>
           AnimatedBuilder(
             animation: _toolbarAnimation,
             builder: (_, child) => Transform.translate(
-              offset:
-              Offset(0, 100 * (1 - _toolbarAnimation.value)),
+              offset: Offset(0, 100 * (1 - _toolbarAnimation.value)),
               child: Opacity(
                   opacity: _toolbarAnimation.value, child: child),
             ),
             child: Positioned(
-              bottom: 0,
-              left: 0,
-              right: 0,
+              bottom: 0, left: 0, right: 0,
               child: _buildBottomBar(),
             ),
           ),
@@ -208,8 +228,7 @@ class _ReadingScreenState extends State<ReadingScreen>
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           Container(
-            width: 70,
-            height: 70,
+            width: 70, height: 70,
             decoration: const BoxDecoration(
               color: AppColors.primarySoft,
               shape: BoxShape.circle,
@@ -218,24 +237,58 @@ class _ReadingScreenState extends State<ReadingScreen>
                 color: AppColors.primary, size: 32),
           ),
           const SizedBox(height: 20),
-          const Text(
-            'جارٍ تحميل الكتاب...',
-            style: TextStyle(
-              color: AppColors.textDark,
-              fontSize: 16,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
+          const Text('جارٍ تحميل الكتاب...',
+              style: TextStyle(
+                  color: AppColors.textDark,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700)),
           const SizedBox(height: 8),
-          const Text(
-            'يتم جلب النص من المكتبة',
-            style: TextStyle(
-                color: AppColors.textLight, fontSize: 13),
-          ),
+          const Text('يتم جلب النص من المكتبة',
+              style: TextStyle(
+                  color: AppColors.textLight, fontSize: 13)),
           const SizedBox(height: 24),
           const CircularProgressIndicator(
-            color: AppColors.primary,
-            strokeWidth: 2,
+              color: AppColors.primary, strokeWidth: 2),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildEmptyState() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Icon(Icons.error_outline_rounded,
+              color: AppColors.textLight, size: 48),
+          const SizedBox(height: 16),
+          const Text('تعذر تحميل الكتاب',
+              style: TextStyle(
+                  color: AppColors.textDark,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700)),
+          const SizedBox(height: 8),
+          const Text('تحقق من الاتصال وحاول مجدداً',
+              style: TextStyle(
+                  color: AppColors.textLight, fontSize: 13)),
+          const SizedBox(height: 24),
+          GestureDetector(
+            onTap: () {
+              setState(() => _loadingText = true);
+              _loadContent();
+            },
+            child: Container(
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 24, vertical: 12),
+              decoration: BoxDecoration(
+                color: AppColors.primary,
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: const Text('إعادة المحاولة',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w700)),
+            ),
           ),
         ],
       ),
@@ -266,18 +319,16 @@ class _ReadingScreenState extends State<ReadingScreen>
               Text(
                 'جارٍ الترجمة إلى ${widget.primaryLanguage}...',
                 style: const TextStyle(
-                  color: AppColors.textDark,
-                  fontWeight: FontWeight.w700,
-                  fontSize: 13,
-                ),
+                    color: AppColors.textDark,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 13),
               ),
               const Spacer(),
               Text(
                 '${(_translationProgress * 100).toInt()}%',
                 style: const TextStyle(
-                  color: AppColors.primary,
-                  fontWeight: FontWeight.w800,
-                ),
+                    color: AppColors.primary,
+                    fontWeight: FontWeight.w800),
               ),
             ],
           ),
@@ -304,12 +355,11 @@ class _ReadingScreenState extends State<ReadingScreen>
     String displayText = _primaryParagraphs[index];
     bool showingSecondary = false;
 
-    if (isLongPressed && _hasSecondary) {
-      if (index < _secondaryParagraphs.length &&
-          _secondaryParagraphs[index].isNotEmpty) {
-        displayText = _secondaryParagraphs[index];
-        showingSecondary = true;
-      }
+    if (isLongPressed && _hasSecondary &&
+        index < _secondaryParagraphs.length &&
+        _secondaryParagraphs[index].isNotEmpty) {
+      displayText = _secondaryParagraphs[index];
+      showingSecondary = true;
     }
 
     final isRTL = showingSecondary
@@ -323,9 +373,7 @@ class _ReadingScreenState extends State<ReadingScreen>
           HapticFeedback.mediumImpact();
         }
       },
-      onLongPressEnd: (_) {
-        setState(() => _longPressedIndex = null);
-      },
+      onLongPressEnd: (_) => setState(() => _longPressedIndex = null),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
         margin: const EdgeInsets.only(bottom: 28),
@@ -334,13 +382,12 @@ class _ReadingScreenState extends State<ReadingScreen>
             : EdgeInsets.zero,
         decoration: isLongPressed
             ? BoxDecoration(
-          color: AppColors.accent.withOpacity(0.08),
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(
-            color: AppColors.accent.withOpacity(0.3),
-            width: 1.5,
-          ),
-        )
+                color: AppColors.accent.withOpacity(0.08),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(
+                    color: AppColors.accent.withOpacity(0.3),
+                    width: 1.5),
+              )
             : null,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -360,33 +407,24 @@ class _ReadingScreenState extends State<ReadingScreen>
                     const Icon(Icons.touch_app_rounded,
                         color: AppColors.accent, size: 12),
                     const SizedBox(width: 4),
-                    Text(
-                      widget.secondaryLanguage!,
-                      style: const TextStyle(
-                        color: AppColors.accent,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
+                    Text(widget.secondaryLanguage!,
+                        style: const TextStyle(
+                            color: AppColors.accent,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700)),
                   ],
                 ),
               ),
-            AnimatedSwitcher(
-              duration: const Duration(milliseconds: 250),
-              child: Text(
-                displayText,
-                key: ValueKey('$index-$showingSecondary'),
-                textAlign:
-                isRTL ? TextAlign.right : TextAlign.left,
-                textDirection: isRTL
-                    ? TextDirection.rtl
-                    : TextDirection.ltr,
-                style: TextStyle(
-                  fontSize: _fontSize,
-                  color: AppColors.textDark.withOpacity(0.85),
-                  height: 2.0,
-                  fontWeight: FontWeight.w400,
-                ),
+            Text(
+              displayText,
+              textAlign: isRTL ? TextAlign.right : TextAlign.left,
+              textDirection:
+                  isRTL ? TextDirection.rtl : TextDirection.ltr,
+              style: TextStyle(
+                fontSize: _fontSize,
+                color: AppColors.textDark.withOpacity(0.85),
+                height: 2.0,
+                fontWeight: FontWeight.w400,
               ),
             ),
           ],
@@ -397,33 +435,26 @@ class _ReadingScreenState extends State<ReadingScreen>
 
   Widget _buildTopBar() {
     return Positioned(
-      top: 0,
-      left: 0,
-      right: 0,
+      top: 0, left: 0, right: 0,
       child: ClipRRect(
         child: BackdropFilter(
           filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
           child: Container(
             padding: EdgeInsets.fromLTRB(
-                16,
-                MediaQuery.of(context).padding.top + 8,
-                16,
-                12),
+                16, MediaQuery.of(context).padding.top + 8, 16, 12),
             decoration: BoxDecoration(
               color: const Color(0xFFFFFBF7).withOpacity(0.9),
               border: Border(
-                bottom: BorderSide(
-                    color: AppColors.textLight.withOpacity(0.15),
-                    width: 1),
-              ),
+                  bottom: BorderSide(
+                      color: AppColors.textLight.withOpacity(0.15),
+                      width: 1)),
             ),
             child: Row(
               children: [
                 GestureDetector(
                   onTap: () => Navigator.pop(context),
                   child: Container(
-                    width: 38,
-                    height: 38,
+                    width: 38, height: 38,
                     decoration: BoxDecoration(
                       color: Colors.white,
                       borderRadius: BorderRadius.circular(12),
@@ -436,8 +467,7 @@ class _ReadingScreenState extends State<ReadingScreen>
                     ),
                     child: const Icon(
                         Icons.arrow_back_ios_new_rounded,
-                        color: AppColors.textDark,
-                        size: 16),
+                        color: AppColors.textDark, size: 16),
                   ),
                 ),
                 const SizedBox(width: 12),
@@ -448,10 +478,9 @@ class _ReadingScreenState extends State<ReadingScreen>
                       Text(
                         widget.book.titleAr,
                         style: const TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w800,
-                          color: AppColors.textDark,
-                        ),
+                            fontSize: 14,
+                            fontWeight: FontWeight.w800,
+                            color: AppColors.textDark),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
@@ -462,41 +491,31 @@ class _ReadingScreenState extends State<ReadingScreen>
                                 horizontal: 8, vertical: 2),
                             decoration: BoxDecoration(
                               color: AppColors.primarySoft,
-                              borderRadius:
-                              BorderRadius.circular(20),
+                              borderRadius: BorderRadius.circular(20),
                             ),
-                            child: Text(
-                              widget.primaryLanguage,
-                              style: const TextStyle(
-                                fontSize: 10,
-                                color: AppColors.primary,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
+                            child: Text(widget.primaryLanguage,
+                                style: const TextStyle(
+                                    fontSize: 10,
+                                    color: AppColors.primary,
+                                    fontWeight: FontWeight.w600)),
                           ),
                           if (_hasSecondary) ...[
                             const SizedBox(width: 4),
                             const Icon(Icons.touch_app_rounded,
-                                color: AppColors.textLight,
-                                size: 10),
+                                color: AppColors.textLight, size: 10),
                             const SizedBox(width: 2),
                             Container(
-                              padding:
-                              const EdgeInsets.symmetric(
+                              padding: const EdgeInsets.symmetric(
                                   horizontal: 8, vertical: 2),
                               decoration: BoxDecoration(
                                 color: AppColors.accentSoft,
-                                borderRadius:
-                                BorderRadius.circular(20),
+                                borderRadius: BorderRadius.circular(20),
                               ),
-                              child: Text(
-                                widget.secondaryLanguage!,
-                                style: const TextStyle(
-                                  fontSize: 10,
-                                  color: AppColors.accent,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
+                              child: Text(widget.secondaryLanguage!,
+                                  style: const TextStyle(
+                                      fontSize: 10,
+                                      color: AppColors.accent,
+                                      fontWeight: FontWeight.w600)),
                             ),
                           ],
                         ],
@@ -507,8 +526,7 @@ class _ReadingScreenState extends State<ReadingScreen>
                 GestureDetector(
                   onTap: _showFontSizeDialog,
                   child: Container(
-                    width: 38,
-                    height: 38,
+                    width: 38, height: 38,
                     decoration: BoxDecoration(
                       color: Colors.white,
                       borderRadius: BorderRadius.circular(12),
@@ -537,17 +555,14 @@ class _ReadingScreenState extends State<ReadingScreen>
         filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
         child: Container(
           padding: EdgeInsets.fromLTRB(
-              20,
-              12,
-              20,
+              20, 12, 20,
               MediaQuery.of(context).padding.bottom + 16),
           decoration: BoxDecoration(
             color: const Color(0xFFFFFBF7).withOpacity(0.95),
             border: Border(
-              top: BorderSide(
-                  color: AppColors.textLight.withOpacity(0.15),
-                  width: 1),
-            ),
+                top: BorderSide(
+                    color: AppColors.textLight.withOpacity(0.15),
+                    width: 1)),
           ),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceAround,
@@ -569,10 +584,9 @@ class _ReadingScreenState extends State<ReadingScreen>
                       Text(
                         'اضغط ← ${widget.secondaryLanguage}',
                         style: const TextStyle(
-                          color: AppColors.accent,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                        ),
+                            color: AppColors.accent,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600),
                       ),
                     ],
                   ),
@@ -607,11 +621,10 @@ class _ReadingScreenState extends State<ReadingScreen>
           const SizedBox(height: 3),
           Text(label,
               style: TextStyle(
-                fontSize: 10,
-                color: isActive
-                    ? AppColors.primary
-                    : AppColors.textLight,
-              )),
+                  fontSize: 10,
+                  color: isActive
+                      ? AppColors.primary
+                      : AppColors.textLight)),
         ],
       ),
     );
@@ -626,15 +639,14 @@ class _ReadingScreenState extends State<ReadingScreen>
           padding: const EdgeInsets.all(24),
           decoration: const BoxDecoration(
             color: Colors.white,
-            borderRadius: BorderRadius.vertical(
-                top: Radius.circular(24)),
+            borderRadius:
+                BorderRadius.vertical(top: Radius.circular(24)),
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               Container(
-                width: 40,
-                height: 4,
+                width: 40, height: 4,
                 decoration: BoxDecoration(
                   color: AppColors.textLight.withOpacity(0.4),
                   borderRadius: BorderRadius.circular(2),
@@ -656,8 +668,7 @@ class _ReadingScreenState extends State<ReadingScreen>
                           (_fontSize - 1).clamp(12, 26));
                     },
                     child: Container(
-                      width: 44,
-                      height: 44,
+                      width: 44, height: 44,
                       decoration: BoxDecoration(
                         color: AppColors.accentSoft,
                         borderRadius: BorderRadius.circular(12),
@@ -669,9 +680,7 @@ class _ReadingScreenState extends State<ReadingScreen>
                   Expanded(
                     child: Slider(
                       value: _fontSize,
-                      min: 12,
-                      max: 26,
-                      divisions: 14,
+                      min: 12, max: 26, divisions: 14,
                       activeColor: AppColors.primary,
                       inactiveColor: AppColors.primarySoft,
                       onChanged: (v) {
@@ -687,8 +696,7 @@ class _ReadingScreenState extends State<ReadingScreen>
                           (_fontSize + 1).clamp(12, 26));
                     },
                     child: Container(
-                      width: 44,
-                      height: 44,
+                      width: 44, height: 44,
                       decoration: BoxDecoration(
                         color: AppColors.primarySoft,
                         borderRadius: BorderRadius.circular(12),
@@ -719,15 +727,14 @@ class _ReadingScreenState extends State<ReadingScreen>
         padding: const EdgeInsets.all(24),
         decoration: const BoxDecoration(
           color: Colors.white,
-          borderRadius: BorderRadius.vertical(
-              top: Radius.circular(24)),
+          borderRadius:
+              BorderRadius.vertical(top: Radius.circular(24)),
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             Container(
-              width: 40,
-              height: 4,
+              width: 40, height: 4,
               decoration: BoxDecoration(
                 color: AppColors.textLight.withOpacity(0.4),
                 borderRadius: BorderRadius.circular(2),
@@ -735,8 +742,7 @@ class _ReadingScreenState extends State<ReadingScreen>
             ),
             const SizedBox(height: 20),
             Container(
-              width: 60,
-              height: 60,
+              width: 60, height: 60,
               decoration: const BoxDecoration(
                 color: AppColors.primarySoft,
                 shape: BoxShape.circle,
@@ -764,14 +770,10 @@ class _ReadingScreenState extends State<ReadingScreen>
               onTap: () => Navigator.pop(context),
               child: Container(
                 width: double.infinity,
-                padding:
-                const EdgeInsets.symmetric(vertical: 16),
+                padding: const EdgeInsets.symmetric(vertical: 16),
                 decoration: BoxDecoration(
                   gradient: const LinearGradient(
-                    colors: [
-                      AppColors.primary,
-                      Color(0xFFFF9A6C)
-                    ],
+                    colors: [AppColors.primary, Color(0xFFFF9A6C)],
                   ),
                   borderRadius: BorderRadius.circular(18),
                 ),
