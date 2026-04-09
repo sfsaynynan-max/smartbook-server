@@ -111,7 +111,7 @@ app.post('/translate-book', async (req, res) => {
             messages: [
               {
                 role: 'system',
-                content: `Translate to ${targetLanguage}. Return ONLY the translation.`,
+                content: `You are a professional Arabic literary translator. Translate the following English text to fluent, natural ${targetLanguage}. Preserve the literary style. Return ONLY the translated text, no explanations.`,
               },
               { role: 'user', content: paragraphs[i] },
             ],
